@@ -6,12 +6,13 @@ from .timing import (
     DEFAULT_GATE_TIMES, DEFAULT_EPR_TIME, DEFAULT_CLASSICAL_LATENCY, fiber_latency,
 )
 from .scheduler import DQCScheduler, Timeline, TimelineEvent
+from .timing_stats import TimingStatistics
 from .decoherence import DecoherenceModel, add_idle_noise, DEFAULT_T1, DEFAULT_T2
 
 __all__ = [
     "DQCCircuit", "DQCQPU", "QPUManager", "IonQ",
     "TimingProvider", "QiskitTimingProvider", "NetworkTimingProvider", "DQCTimingProvider",
     "DEFAULT_GATE_TIMES", "DEFAULT_EPR_TIME", "DEFAULT_CLASSICAL_LATENCY", "fiber_latency",
-    "DQCScheduler", "Timeline", "TimelineEvent",
+    "DQCScheduler", "Timeline", "TimelineEvent", "TimingStatistics",
     "DecoherenceModel", "add_idle_noise", "DEFAULT_T1", "DEFAULT_T2",
 ]

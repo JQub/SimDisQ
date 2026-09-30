@@ -102,7 +102,8 @@ print(f"Measure(0) on QPU0: {QPUGROUP.get_gate_time(0, 'measure', (0,)) * US:.4f
 print(f"Reset(0) on QPU0  : {QPUGROUP.get_gate_time(0, 'reset', (0,)) * US:.4f} us (default)")
 
 # Network times come from the SimDisQ network model.
-print(f"EPR QPU0<->QPU1   : {QPUGROUP.get_epr_time(0, 1) * MS:.3f} ms")
+print(f"EPR QPU0<->QPU1   : {QPUGROUP.get_epr_time(0, 1) * MS:.3f} ms generation + "
+      f"{QPUGROUP.get_epr_transmission_time(0, 1) * US:.3f} us transmission (5 km fiber)")
 print(f"Classical QPU0->1 : {QPUGROUP.get_classical_latency(0, 1) * US:.3f} us")
 
 # Unified entry point: get_operation_duration(operation, resource, context)
@@ -113,15 +114,24 @@ print("Unified API       :",
 
 
 # ============================================================
-# Step 2: Custom timing (per-link values, models, defaults)
+# Step 2: Custom timing (user gate times, per-link values, models, defaults)
 # ============================================================
 print("\n" + "=" * 60)
 print("Step 2: Custom timing")
 print("=" * 60)
 
 timing = DQCTimingProvider(
-    # Override local defaults used when the backend has no calibration.
-    QiskitTimingProvider(default_times={"reset": 2e-6}),
+    QiskitTimingProvider(
+        # User gate times override the backend (native gate names after transpilation).
+        gate_times={
+            "x": 10e-6,                 # X on every QPU
+            "rz": 2e-6,                 # Z / RZ (no longer a virtual gate)
+            (1, "cx"): 500e-9,          # CX on QPU 1 only
+            (1, "cx", (0, 1)): 450e-9,  # CX(0,1) on QPU 1 only
+        },
+        # Used only when the backend has no calibration.
+        default_times={"reset": 2e-6},
+    ),
     NetworkTimingProvider(
         # T_EPR = f(distance): 1 ms base + 0.2 ms per unit distance.
         epr_model=lambda src, dst, dist: 1e-3 + 0.2e-3 * (dist or 0),
@@ -133,13 +143,20 @@ CUSTOM = QPUManager(timing=timing)
 for i in range(4):
     CUSTOM.add_qpu(DQCQPU(i, "FakeVigoV2"))
 CUSTOM.add_coonnection(0, 1, distance=5)                     # from the models
-CUSTOM.add_coonnection(1, 2, distance=5, epr_time=5e-3)      # per-link EPR override
+CUSTOM.add_coonnection(1, 2, distance=5, epr_time=5e-3,      # per-link EPR overrides
+                       epr_transmission_time=100e-6)
 CUSTOM.add_coonnection(2, 3, distance=10, classical_latency=50e-6)  # per-link classical override
 
 for a, b in [(0, 1), (1, 2), (2, 3)]:
-    print(f"Link {a}-{b}: EPR {CUSTOM.get_epr_time(a, b) * MS:.3f} ms, "
+    print(f"Link {a}-{b}: EPR {CUSTOM.get_epr_time(a, b) * MS:.3f} ms + "
+          f"{CUSTOM.get_epr_transmission_time(a, b) * US:.3f} us transmission, "
           f"classical {CUSTOM.get_classical_latency(a, b) * US:.3f} us")
-print(f"Reset(0) on QPU0: {CUSTOM.get_gate_time(0, 'reset', (0,)) * US:.3f} us (custom default)")
+print(f"X(0) on QPU0      : {CUSTOM.get_gate_time(0, 'x', (0,)) * US:.3f} us (user, backend has 0.036 us)")
+print(f"RZ(0) on QPU0     : {CUSTOM.get_gate_time(0, 'rz', (0,)) * US:.3f} us (user, backend has 0)")
+print(f"SX(0) on QPU0     : {CUSTOM.get_gate_time(0, 'sx', (0,)) * US:.3f} us (backend)")
+print(f"CX(0,1) QPU0/QPU1 : {CUSTOM.get_gate_time(0, 'cx', (0, 1)) * US:.3f} / "
+      f"{CUSTOM.get_gate_time(1, 'cx', (0, 1)) * US:.3f} us")
+print(f"Reset(0) on QPU0  : {CUSTOM.get_gate_time(0, 'reset', (0,)) * US:.3f} us (custom default)")
 
 
 # ============================================================
@@ -155,11 +172,19 @@ result_qc = qc.Execution(Partition, CUSTOM, comm_noise=True)   # estimate_time=T
 timeline = qc.timeline
 timeline.print_summary()
 
+# Timing statistics: critical-path decomposition, per gate / link / channel / QPU.
+stats = timeline.statistics()
+stats.report()
+stats.to_json("GHZ_12qubit_DQC_timing.json")
+
 print("Network events:")
 for ev in timeline.events:
-    if ev.kind in ("epr", "classical"):
-        print(f"  {ev.kind:<9} QPU {ev.qpus}  {ev.start * MS:8.4f} -> {ev.end * MS:8.4f} ms  "
-              f"(wait {ev.wait * US:.3f} us)")
+    if ev.kind == "epr":
+        print(f"  epr       QPU {ev.qpus}  {ev.start * MS:8.4f} -> {ev.end * MS:8.4f} ms  "
+              f"(generation {ev.segment('epr_generation') * MS:.3f} ms, "
+              f"transmission {ev.segment('epr_transmission') * US:.3f} us, wait {ev.wait * US:.3f} us)")
+    elif ev.kind == "classical":
+        print(f"  classical QPU {ev.qpus}  {ev.start * MS:8.4f} -> {ev.end * MS:8.4f} ms")
 
 # Waiting time is an output of the scheduler: idle gaps of each qubit.
 q_worst = max(timeline.qubit_idle, key=timeline.qubit_idle.get)

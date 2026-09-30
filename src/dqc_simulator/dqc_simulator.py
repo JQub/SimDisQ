@@ -153,12 +153,14 @@ class QPUManager:
         return None
     
     def add_coonnection(self, qpu_id1, qpu_id2, distance: float = 0,
-                        epr_time: float = None, classical_latency: float = None):
+                        epr_time: float = None, classical_latency: float = None,
+                        epr_transmission_time: float = None):
         """
         Add bidirectional connection between two QPUs.
 
         :param epr_time: EPR generation time on this link in seconds (None -> timing default)
         :param classical_latency: classical message latency in seconds (None -> timing default)
+        :param epr_transmission_time: EPR delivery time in seconds (None -> fiber propagation of distance km)
         """
         qpu1 = self.get_qpu(qpu_id1)
         qpu2 = self.get_qpu(qpu_id2)
@@ -181,7 +183,8 @@ class QPUManager:
 
         # Register link timing
         self.timing.register_link(qpu_id1, qpu_id2, distance=distance,
-                                  epr_time=epr_time, classical_latency=classical_latency)
+                                  epr_time=epr_time, classical_latency=classical_latency,
+                                  epr_transmission_time=epr_transmission_time)
 
     def get_noise_instruction(self, qpu_id1, qpu_id2):
         """Get noise instruction for connection between two QPUs"""
@@ -201,6 +204,10 @@ class QPUManager:
     def get_epr_time(self, qpu_id1, qpu_id2):
         """EPR generation time between two linked QPUs"""
         return self.timing.get_epr_time(qpu_id1, qpu_id2)
+
+    def get_epr_transmission_time(self, qpu_id1, qpu_id2):
+        """EPR transmission (delivery) time between two linked QPUs"""
+        return self.timing.get_epr_transmission_time(qpu_id1, qpu_id2)
 
     def get_classical_latency(self, qpu_id1, qpu_id2):
         """Classical communication latency from qpu_id1 to qpu_id2"""

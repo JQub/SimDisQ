@@ -87,36 +87,64 @@ result_qc = qc.Execution(
 ### 7. Timing and Scheduling
 All durations go through one timing interface (`TimingProvider`, seconds):
 
-- Local gate / measure / reset times are read from each QPU's Qiskit `Target`
-  (`QiskitTimingProvider`); missing values fall back to `DEFAULT_GATE_TIMES`.
-- EPR generation and classical latency come from `NetworkTimingProvider`
-  (defaults: 2 ms and 20 us per link, overridable per link).
+- Local gate / measure / reset times (`QiskitTimingProvider`, native post-transpile gates):
+  user `gate_times` > each QPU's Qiskit `Target` > `DEFAULT_GATE_TIMES`.
+- Each EPR pair costs generation + transmission (`NetworkTimingProvider`):
+  generation defaults to 2 ms and occupies the link; transmission defaults to fiber
+  propagation of the link distance (km, 5 us/km). Classical latency defaults to 20 us.
+  All are overridable per link or by a model `f(src, dst, distance)`.
 - Waiting time is not an input: `Execution` schedules the merged circuit (ASAP,
   event based, with link contention) and stores the result in `qc.timeline`.
 
 ```python
-QPUGROUP.add_coonnection(0, 1, distance=5, epr_time=5e-3, classical_latency=50e-6)
+QPUGROUP.add_coonnection(0, 1, distance=5, epr_time=5e-3, classical_latency=50e-6,
+                         epr_transmission_time=100e-6)
 
 QPUGROUP.get_gate_time(0, "cx", (0, 1))                        # from Qiskit Target
 QPUGROUP.get_operation_duration("epr_generation", (0, 1))      # from network model
+QPUGROUP.get_operation_duration("epr_transmission", (0, 1))
 
 result_qc = qc.Execution(Partition, QPUGROUP, comm_noise=True)
 qc.timeline.print_summary()      # makespan, EPR / classical / wait breakdown
 qc.timeline.idle_intervals       # {qubit: [(start, end), ...]} for decoherence models
 ```
 
+Timing statistics (`TimingStatistics`):
+```python
+stats = qc.timeline.statistics()
+stats.report()                   # full report below
+stats.critical_path()            # makespan = local + epr_generation + epr_transmission + classical + waiting
+stats.gate_stats(by_qpu=True)    # count / mean / total of each native gate
+stats.epr_stats()                # per link: EPR count, generation, transmission, link wait
+stats.classical_stats()          # per channel: message count and latency
+stats.qpu_stats()                # per QPU: local time, feed-forward wait, qubit idle, span
+stats.to_json("timing.json")     # export
+```
+The critical-path decomposition sums exactly to the makespan; per-gate / per-link totals
+are summed over all events and may overlap in time.
+
 Custom defaults or models:
 ```python
 from dqc_simulator import DQCTimingProvider, QiskitTimingProvider, NetworkTimingProvider, fiber_latency
 
 timing = DQCTimingProvider(
-    QiskitTimingProvider(default_times={"reset": 2e-6}),
+    QiskitTimingProvider(
+        gate_times={                    # override the backend (native gate names)
+            "x": 10e-6,                 # X on every QPU
+            "rz": 2e-6,                 # Z / RZ (no longer virtual)
+            (1, "cx"): 500e-9,          # CX on QPU 1
+            (1, "cx", (0, 1)): 450e-9,  # CX(0,1) on QPU 1
+        },
+        default_times={"reset": 2e-6},  # only used when the backend has no value
+    ),
     NetworkTimingProvider(
         default_epr_time=1e-3,
         classical_model=lambda a, b, dist: fiber_latency(dist, processing=5e-6),
+        transmission_model=lambda a, b, dist: fiber_latency(dist),
     ),
 )
 QPUGROUP = QPUManager(timing=timing)
+timing.local.set_gate_time("measure", 3e-6, qpu=0)   # can also be set later
 ```
 
 Idle decoherence (waiting time -> T1/T2 -> fidelity):
