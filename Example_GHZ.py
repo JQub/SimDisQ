@@ -109,10 +109,16 @@ QPUGROUP.add_qpu(DQCQPU(2, "FakeVigoV2"))
 QPUGROUP.add_qpu(DQCQPU(3, "FakeVigoV2"))
 
 # Define inter-QPU network topology
+# Optional per-link timing (seconds); omitted values use the defaults
+# (DEFAULT_EPR_TIME = 2 ms, DEFAULT_CLASSICAL_LATENCY = 20 us).
 dis = 5  # communication distance / cost
 QPUGROUP.add_coonnection(0, 1, distance=dis)
-QPUGROUP.add_coonnection(1, 2, distance=dis)
-QPUGROUP.add_coonnection(2, 3, distance=dis)
+QPUGROUP.add_coonnection(1, 2, distance=dis, epr_time=5e-3)
+QPUGROUP.add_coonnection(2, 3, distance=dis, classical_latency=50e-6)
+
+# Unified timing interface
+print("CX(0,1) on QPU0 :", QPUGROUP.get_gate_time(0, "cx", (0, 1)), "s")
+print("EPR QPU1<->QPU2 :", QPUGROUP.get_epr_time(1, 2), "s")
 
 
 # ============================================================
@@ -121,8 +127,12 @@ QPUGROUP.add_coonnection(2, 3, distance=dis)
 result_qc = qc.Execution(
     Partition,
     QPUGROUP,
-    comm_noise=True
+    comm_noise=True,
+    idle_noise=False    # True: add T1/T2 decoherence on idle (waiting) time
 )
+
+# Timeline produced by the scheduler (latency, network waiting, qubit idle time)
+qc.timeline.print_summary()
 
 # Obtain combined noise model (local + communication)
 noise_model = qc.get_noise_model()

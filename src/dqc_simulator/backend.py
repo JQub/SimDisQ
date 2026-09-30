@@ -32,8 +32,8 @@ class IonQ(BackendV2):
         # Timing parameters (in seconds)
         self.t_readout = 0.00005  # 50 us
         self.t_reset = 0.000015   # 15 us
-        self.t_1q = 0.000135      # 135 ns
-        self.t_2q = 0.0006        # 600 ns
+        self.t_1q = 0.000135      # 135 us
+        self.t_2q = 0.0006        # 600 us
         self.t1_time = 10         # 10 s
         self.t2_time = 1.5        # 1.5 s
         
