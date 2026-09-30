@@ -25,6 +25,11 @@ from qiskit_ibm_runtime.fake_provider import (
 # Backend IonQ
 from .backend import IonQ
 
+# Timing interface and scheduler
+from .timing import DQCTimingProvider, QiskitTimingProvider, NetworkTimingProvider
+from .scheduler import DQCScheduler
+from .decoherence import DecoherenceModel, add_idle_noise
+
 from qiskit_aer.noise import (
     NoiseModel,
     depolarizing_error, pauli_error,
@@ -109,7 +114,7 @@ FAKE_BACKENDS = {
 }
 
 class QPUManager:
-    def __init__(self):
+    def __init__(self, timing=None):
         """
         Initialize QPU manager to handle multiple QPUs and their connections.
         
@@ -118,6 +123,7 @@ class QPUManager:
             noise_instructions: Dict mapping QPU pairs to noise instructions
             map: Adjacency list representing QPU network topology
             size: Total number of QPUs in the manager
+            timing: TimingProvider (default: Qiskit local timing + default network timing)
         """
         # Store QPUs and noise instructions
         self.qpus = []
@@ -125,6 +131,10 @@ class QPUManager:
         # Adjacency list: {qpu_id: [(neighbor_id, distance), ...]}
         self.map = {}  
         self.size = 0
+
+        if timing is None:
+            timing = DQCTimingProvider(QiskitTimingProvider(qpu_resolver=self.get_qpu), NetworkTimingProvider())
+        self.timing = timing
 
     def add_qpu(self, qpu):
         """Add a QPU to the manager"""
@@ -142,8 +152,14 @@ class QPUManager:
                 return qpu
         return None
     
-    def add_coonnection(self, qpu_id1, qpu_id2, distance: float = 0):
-        """Add bidirectional connection between two QPUs"""
+    def add_coonnection(self, qpu_id1, qpu_id2, distance: float = 0,
+                        epr_time: float = None, classical_latency: float = None):
+        """
+        Add bidirectional connection between two QPUs.
+
+        :param epr_time: EPR generation time on this link in seconds (None -> timing default)
+        :param classical_latency: classical message latency in seconds (None -> timing default)
+        """
         qpu1 = self.get_qpu(qpu_id1)
         qpu2 = self.get_qpu(qpu_id2)
         if qpu1 is None or qpu2 is None:
@@ -163,6 +179,10 @@ class QPUManager:
         self.noise_instructions[(qpu_id1, qpu_id2)] = noise_instr
         self.noise_instructions[(qpu_id2, qpu_id1)] = noise_instr
 
+        # Register link timing
+        self.timing.register_link(qpu_id1, qpu_id2, distance=distance,
+                                  epr_time=epr_time, classical_latency=classical_latency)
+
     def get_noise_instruction(self, qpu_id1, qpu_id2):
         """Get noise instruction for connection between two QPUs"""
         return self.noise_instructions.get((qpu_id1, qpu_id2), None)
@@ -172,6 +192,25 @@ class QPUManager:
         if qpu_id1 not in self.map:
             return 0
         return 1 if any(n == qpu_id2 for n, _ in self.map[qpu_id1]) else 0
+
+    # ---- Timing interface (all values in seconds) ----
+    def get_gate_time(self, qpu_id, gate, qubits):
+        """Local gate time of `gate` on physical `qubits` of QPU `qpu_id`"""
+        return self.timing.get_gate_time(self.get_qpu(qpu_id), gate, qubits)
+
+    def get_epr_time(self, qpu_id1, qpu_id2):
+        """EPR generation time between two linked QPUs"""
+        return self.timing.get_epr_time(qpu_id1, qpu_id2)
+
+    def get_classical_latency(self, qpu_id1, qpu_id2):
+        """Classical communication latency from qpu_id1 to qpu_id2"""
+        return self.timing.get_classical_latency(qpu_id1, qpu_id2)
+
+    def get_operation_duration(self, operation, resource, context=None):
+        """Unified entry: context is a qpu_id for local gates, None for network events"""
+        if isinstance(context, (int, np.integer)):
+            context = self.get_qpu(context)
+        return self.timing.get_operation_duration(operation, resource, context)
 
 
 class DQCQPU:
@@ -335,8 +374,11 @@ class DQCCircuit(QuantumCircuit):
         self.Num_Entanglement_swapping = 0          # Entanglement swapping count
         self.Num_RemoteGate = 0
 
+        self.timeline = None                        # Scheduled timeline of result_circuit
+        self.result_circuit_idle = None             # result_circuit + idle decoherence
+
     # Execute the distributed-circuit workflow.
-    def Execution(self, config, qpugroup, comm_noise = False):
+    def Execution(self, config, qpugroup, comm_noise = False, estimate_time = True, idle_noise = False):
         self.qpugroup = qpugroup
         qpus = self.qpugroup.qpus
 
@@ -358,8 +400,53 @@ class DQCCircuit(QuantumCircuit):
         # plt.show()
 
         result_qc = self.merge_trans_circuits(comm_noise)
+
+        if estimate_time or idle_noise:
+            self.schedule()
+            print(f"Estimated execution time: {self.timeline.makespan * 1e6:.3f} us")
+
+        # Waiting time -> T1/T2 decoherence on idle qubits
+        if idle_noise:
+            decoherence = idle_noise if isinstance(idle_noise, DecoherenceModel) else None
+            result_qc = self.add_idle_noise(decoherence)
         
         return result_qc
+
+    # Global qubit -> (QPU, physical qubit on that QPU)
+    def _qubit_location(self):
+        return {
+            global_q: (self.qpus[sub_index], local_index)
+            for global_q, (sub_index, local_index) in self.merged_qubits_map.items()
+        }
+
+    # Insert idle decoherence into the merged circuit based on the timeline
+    def add_idle_noise(self, decoherence=None):
+        """
+        :param decoherence: DecoherenceModel (default: thermal relaxation with backend T1/T2)
+        :return: result_circuit with idle-noise channels (also stored in self.result_circuit_idle)
+        """
+        if self.timeline is None:
+            self.schedule()
+        self.result_circuit_idle = add_idle_noise(
+            self.result_circuit, self.timeline, self._qubit_location(), decoherence
+        )
+        return self.result_circuit_idle
+
+    # Schedule the merged circuit with the timing interface
+    def schedule(self, timing=None):
+        """
+        Build an ASAP timeline of self.result_circuit.
+
+        :param timing: TimingProvider; defaults to self.qpugroup.timing
+        :return: Timeline (makespan, events, per-qubit idle intervals)
+        """
+        if self.result_circuit is None:
+            raise ValueError("No merged circuit found. Please run Execution first.")
+        if timing is None:
+            timing = self.qpugroup.timing
+
+        self.timeline = DQCScheduler(timing).schedule(self.result_circuit, self._qubit_location())
+        return self.timeline
 
     # Get the index of a qubit in the circuit
     def get_index(self, q):
